@@ -1,6 +1,72 @@
 import React, { useState } from 'react';
-import { Search, Flame, Sparkles, Filter, SlidersHorizontal, MapPin, DollarSign, Building, Eye, ArrowUpRight } from 'lucide-react';
+import { Search, Flame, Sparkles, Filter, SlidersHorizontal, MapPin, DollarSign, Building, Eye, ArrowUpRight, Zap } from 'lucide-react';
 import PropertyCard from './PropertyCard';
+
+// ─── Natural Language Query Parser ───────────────────────────────────────────
+// Understands queries like:
+//   "villa under 2cr", "penthouse kochi below 3 crore",
+//   "1.5 lakh", "below 50 lakh", "munnar chalet", "3 bhk kochi"
+const KERALA_CITIES = ['kochi', 'kumarakom', 'munnar', 'trivandrum', 'wayanad', 'kozhikode', 'calicut', 'thrissur', 'vythiri', 'pallivasal'];
+const CITY_NORMALIZE = { calicut: 'Kozhikode', vythiri: 'Wayanad', pallivasal: 'Munnar' };
+const PROPERTY_TYPES = ['penthouse', 'villa', 'chalet', 'condo', 'apartment', 'bungalow', 'estate', 'single family', 'waterfront'];
+const TYPE_NORMALIZE = { bungalow: 'Chalet', apartment: 'Condo', estate: 'Waterfront Estate', 'single family': 'Single Family', waterfront: 'Waterfront Estate' };
+
+function parseNaturalQuery(raw) {
+  const q = raw.toLowerCase().trim();
+  const result = { cleanText: q, maxPrice: null, city: null, type: null, bedrooms: null };
+
+  // ── Price extraction ──────────────────────────────────────────────────────
+  // Patterns: "under 2cr", "below 2.5 crore", "2cr", "< 50 lakh", "upto 95 lakh"
+  const pricePatterns = [
+    /(?:under|below|less than|upto|up to|within|<)\s*([\d.]+)\s*cr(?:ore)?s?/,
+    /(?:under|below|less than|upto|up to|within|<)\s*([\d.]+)\s*lakh/,
+    /([\d.]+)\s*cr(?:ore)?s?\s*(?:budget|max|limit)?/,
+    /([\d.]+)\s*lakh\s*(?:budget|max|limit)?/,
+  ];
+  const isCrore = (pat) => pat.source.includes('cr');
+
+  for (let i = 0; i < pricePatterns.length; i++) {
+    const m = q.match(pricePatterns[i]);
+    if (m) {
+      const val = parseFloat(m[1]);
+      result.maxPrice = isCrore(pricePatterns[i]) ? Math.round(val * 10000000) : Math.round(val * 100000);
+      result.cleanText = result.cleanText.replace(m[0], ' ').trim();
+      break;
+    }
+  }
+
+  // ── City extraction ───────────────────────────────────────────────────────
+  for (const city of KERALA_CITIES) {
+    if (q.includes(city)) {
+      result.city = CITY_NORMALIZE[city] || city.charAt(0).toUpperCase() + city.slice(1);
+      result.cleanText = result.cleanText.replace(city, ' ').trim();
+      break;
+    }
+  }
+
+  // ── Property type extraction ──────────────────────────────────────────────
+  for (const type of PROPERTY_TYPES) {
+    if (q.includes(type)) {
+      result.type = TYPE_NORMALIZE[type] || type.charAt(0).toUpperCase() + type.slice(1);
+      result.cleanText = result.cleanText.replace(type, ' ').trim();
+      break;
+    }
+  }
+
+  // ── BHK / Bedrooms extraction ─────────────────────────────────────────────
+  const bhkMatch = q.match(/(\d+)\s*(?:bhk|bed(?:room)?s?|br)/);
+  if (bhkMatch) {
+    result.bedrooms = parseInt(bhkMatch[1]);
+    result.cleanText = result.cleanText.replace(bhkMatch[0], ' ').trim();
+  }
+
+  // Strip noise words from leftover cleanText
+  result.cleanText = result.cleanText
+    .replace(/\b(in|at|near|around|for|a|an|the|and|with|under|below|above|budget|property|properties|show|find|list|me)\b/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+
+  return result;
+}
 
 export default function Dashboard({ 
   properties, 
@@ -27,17 +93,29 @@ export default function Dashboard({
     }
   };
 
-  const filteredProperties = properties.filter((p) => {
-    const matchesQuery = !searchTerm || 
-      p.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
-      p.location.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.description.toLowerCase().includes(searchTerm.toLowerCase());
-    
-    const matchesCity = selectedCity === 'All' || p.city.toLowerCase() === selectedCity.toLowerCase();
-    const matchesType = selectedType === 'All' || p.type.toLowerCase() === selectedType.toLowerCase();
-    const matchesPrice = !maxPrice || p.price <= Number(maxPrice);
+  // Parse natural language from the search term
+  const parsed = searchTerm ? parseNaturalQuery(searchTerm) : { cleanText: '', maxPrice: null, city: null, type: null, bedrooms: null };
 
-    return matchesQuery && matchesCity && matchesType && matchesPrice;
+  // Effective filter values: NLP-extracted values take priority, dropdowns are fallback
+  const effectiveCity = parsed.city || (selectedCity !== 'All' ? selectedCity : null);
+  const effectiveType = parsed.type || (selectedType !== 'All' ? selectedType : null);
+  const effectiveMaxPrice = parsed.maxPrice || (maxPrice ? Number(maxPrice) : null);
+
+  const filteredProperties = properties.filter((p) => {
+    // Leftover clean text (after stripping price/city/type tokens) still does text match
+    const leftover = parsed.cleanText;
+    const matchesQuery = !leftover ||
+      p.title.toLowerCase().includes(leftover) ||
+      p.location.toLowerCase().includes(leftover) ||
+      p.description.toLowerCase().includes(leftover) ||
+      p.type.toLowerCase().includes(leftover);
+
+    const matchesCity = !effectiveCity || p.city.toLowerCase() === effectiveCity.toLowerCase();
+    const matchesType = !effectiveType || p.type.toLowerCase().includes(effectiveType.toLowerCase());
+    const matchesPrice = !effectiveMaxPrice || p.price <= effectiveMaxPrice;
+    const matchesBedrooms = !parsed.bedrooms || p.bedrooms >= parsed.bedrooms;
+
+    return matchesQuery && matchesCity && matchesType && matchesPrice && matchesBedrooms;
   }).sort((a, b) => {
     if (sortBy === 'searches') return (b.searchesCount || 0) - (a.searchesCount || 0);
     if (sortBy === 'views') return (b.views || 0) - (a.views || 0);
@@ -45,6 +123,13 @@ export default function Dashboard({
     if (sortBy === 'price-desc') return b.price - a.price;
     return 0;
   });
+
+  // Build a summary of what the AI understood from the query
+  const parsedHints = [];
+  if (parsed.type) parsedHints.push(`Type: ${parsed.type}`);
+  if (parsed.city) parsedHints.push(`City: ${parsed.city}`);
+  if (parsed.maxPrice) parsedHints.push(`Budget: ≤ ₹${parsed.maxPrice >= 10000000 ? (parsed.maxPrice/10000000).toFixed(2)+' Cr' : (parsed.maxPrice/100000).toFixed(0)+' Lakh'}`);
+  if (parsed.bedrooms) parsedHints.push(`Min ${parsed.bedrooms} BHK`);
 
   return (
     <div className="space-y-10 max-w-7xl mx-auto pb-16">
@@ -183,9 +268,29 @@ export default function Dashboard({
           </button>
         </form>
 
+        {/* AI NLP Parse Hints — shown when AI extracted something from query */}
+        {parsedHints.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-slate-800">
+            <span className="flex items-center gap-1 text-[11px] text-purple-300 font-semibold">
+              <Zap className="w-3.5 h-3.5 text-purple-400" /> AI understood:
+            </span>
+            {parsedHints.map((hint, i) => (
+              <span key={i} className="px-2.5 py-1 rounded-full bg-purple-950/60 border border-purple-500/40 text-purple-200 text-[11px] font-mono font-semibold">
+                {hint}
+              </span>
+            ))}
+            <button
+              onClick={() => setSearchTerm('')}
+              className="ml-auto text-[11px] text-slate-500 hover:text-rose-400 transition-colors underline underline-offset-2"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+
         {/* Sort controls */}
         <div className="flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
-          <span>Showing {filteredProperties.length} active Kerala listings</span>
+          <span>Showing <strong className="text-white">{filteredProperties.length}</strong> active Kerala listings</span>
           
           <div className="flex items-center gap-2">
             <SlidersHorizontal className="w-3.5 h-3.5 text-cyan-400" />
